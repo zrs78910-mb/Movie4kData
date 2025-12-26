@@ -10,14 +10,15 @@ from bs4 import BeautifulSoup, NavigableString
 # --- CONFIGURATION (SETTINGS) ---
 # ==============================================================
 
-# 1. BOT TOKEN
-BOT_TOKEN = "BOT_TOKEN"
+# 1. BOT TOKEN (Render / Local ENV)
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 # 2. SHEET 1 API (Cinevood & Movies4U)
-SHEET_API_1 = "SHEET_API_1"
+SHEET_API_1 = os.getenv("SHEET_API_1")
 
 # 3. SHEET 2 API (FilmyFly)
-SHEET_API_2 = "SHEET_API_2"
+SHEET_API_2 = os.getenv("SHEET_API_2")
+
 
 # 4. WEBSITES
 URL_CINEVOOD = "https://cv.webrip.workers.dev/"
