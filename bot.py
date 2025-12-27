@@ -3,22 +3,38 @@ import requests
 import json
 import re
 import asyncio
+import os
+import threading
 from bs4 import BeautifulSoup, NavigableString
 from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler
+from flask import Flask
 
-# ---------------------------------------------------------
-# CONFIGURATION
-# ---------------------------------------------------------
+# ==============================================================
+# --- FLASK SERVER (KEEP ALIVE FOR RENDER) ---
+# ==============================================================
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot is Alive & Running!"
+
+def run_web_server():
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port)
+
+# ==============================================================
+# --- CONFIGURATION ---
+# ==============================================================
 BOT_TOKEN = "8231679051:AAFoqLilEuYVXe8oXFNZmIDvHydE5EzqvyU"
 
-# ✅ NEW APPS SCRIPT URL
+# ✅ APPS SCRIPT URL
 APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycby_0-q2cYNG7QatU0ypGwA32z1w4m8hXxnHv-wuJPoPKNyxsd0TCdWyuyaYW5RKMy0H/exec"
 
 # Website Config
 BASE_URL = "https://www.filmyfiy.mov"
-CHECK_INTERVAL = 60  # Seconds (1 Minute)
+CHECK_INTERVAL = 60  # Seconds
 
 # Global control flag
 is_running = False
@@ -38,12 +54,11 @@ HEADERS = {
 # ---------------------------------------------------------
 
 def fetch_existing_titles():
-    """Sheet से पुराने Titles लाता है (Comparison के लिए)"""
+    """Sheet से पुराने Titles लाता है"""
     try:
         response = requests.get(APPS_SCRIPT_URL, timeout=20)
         if response.status_code == 200:
             data = response.json()
-            # सभी Titles का List (lowercase में ताकि duplicate न हो)
             if isinstance(data, list):
                 titles = [str(item.get('Title', '')).strip().lower() for item in data if item.get('Title')]
                 return titles
@@ -55,7 +70,6 @@ def fetch_existing_titles():
 def upload_to_sheet(data):
     """नये डेटा को Sheet में Upload करता है"""
     try:
-        # Links Formatting
         formatted_links = ""
         for item in data['files']:
             if item.get("type") == "header":
@@ -180,9 +194,7 @@ async def monitoring_loop(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     while is_running:
         try:
-            print("--- Checking for updates ---")
-            
-            # 1. Fetch Existing Data (Source of Truth)
+            # 1. Fetch Existing Data
             existing_titles = fetch_existing_titles()
             
             # 2. Fetch Website Page 1
@@ -191,61 +203,43 @@ async def monitoring_loop(update: Update, context: ContextTypes.DEFAULT_TYPE):
             new_items_temp = []
 
             # 3. Identify New Items
-            # हम Page 1 के लिंक्स को चेक करेंगे।
-            # Note: Efficiency के लिए हम सिर्फ Top 5-10 चेक कर सकते हैं, पर यहाँ पूरा Page 1 चेक कर रहे हैं।
-            
             for link in page1_links:
                 if not is_running: break
                 
-                # डिटेल पेज स्क्रैप करें टाइटल चेक करने के लिए
                 data = scrape_movie_details(link)
                 
                 if data and data['title']:
                     clean_title = data['title'].strip().lower()
                     
-                    # अगर टाइटल शीट में नहीं है -> नया है
                     if clean_title not in existing_titles:
                         print(f"New Found: {data['title']}")
                         new_items_temp.append(data)
                     else:
-                        # जैसे ही कोई पुराना आइटम मिला, मतलब इसके नीचे सब पुराने हैं
-                        # (Website क्रम: Newest Top) -> Loop Break कर सकते हैं Time बचाने के लिए
+                        # Found existing item, break loop
                         break 
                 
-                await asyncio.sleep(1) # Gentle scraping
+                await asyncio.sleep(1)
 
             # 4. Upload Logic
             if new_items_temp:
                 count = len(new_items_temp)
                 await context.bot.send_message(chat_id, f"🔥 **Found {count} New Movies!** Uploading...", parse_mode=ParseMode.HTML)
                 
-                # IMPORTANT: Reverse List
-                # Website: [A(New), B, C] -> Scraper gets [A, B, C]
-                # We need to upload C first, then B, then A so A stays at top of sheet.
-                new_items_temp.reverse()
+                new_items_temp.reverse() # Reverse to upload oldest new item first
 
-                success_count = 0
                 for item in new_items_temp:
                     if not is_running: break
                     
                     if upload_to_sheet(item):
-                        success_count += 1
                         await context.bot.send_message(chat_id, f"✅ Uploaded: <b>{item['title']}</b>", parse_mode=ParseMode.HTML)
                     else:
                         await context.bot.send_message(chat_id, f"❌ Failed: {item['title']}", parse_mode=ParseMode.HTML)
                     
-                    await asyncio.sleep(2) # API Rate Limit Safety
-                
-                # Update local cache logic not needed as we fetch fresh sheet data every loop
+                    await asyncio.sleep(2)
             
-            else:
-                print("No new movies found.")
-
         except Exception as e:
             print(f"Loop Error: {e}")
-            await context.bot.send_message(chat_id, f"⚠️ Error in loop: {str(e)}")
         
-        # Wait for next cycle
         if is_running:
             await asyncio.sleep(CHECK_INTERVAL)
 
@@ -262,7 +256,6 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     is_running = True
-    # Start the loop as a background task
     asyncio.create_task(monitoring_loop(update, context))
 
 async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -275,14 +268,19 @@ async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🛑 Stopping... (Waiting for current process to finish)")
 
 # ---------------------------------------------------------
-# MAIN
+# MAIN EXECUTION
 # ---------------------------------------------------------
 if __name__ == '__main__':
-    print("Bot is starting...")
+    # 1. Start Web Server in Background (For Render)
+    print("🌍 Starting Web Server...")
+    threading.Thread(target=run_web_server, daemon=True).start()
+
+    # 2. Start Bot
+    print("🤖 Bot is starting...")
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("stop", stop_cmd))
     
-    print("Bot is running...")
+    print("Bot is polling...")
     app.run_polling()
