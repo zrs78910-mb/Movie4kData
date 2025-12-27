@@ -4,9 +4,7 @@ import re
 import time
 import threading
 import json
-import os
 from bs4 import BeautifulSoup, NavigableString
-from flask import Flask
 
 # ==============================================================
 # --- CONFIGURATION (SETTINGS) ---
@@ -35,27 +33,15 @@ HEADERS = {
 }
 
 bot = telebot.TeleBot(BOT_TOKEN)
-IS_RUNNING = True  # Default True for Server
-LOG_CHAT_ID = None # Will update when /start is used
+IS_RUNNING = False
+LOG_CHAT_ID = None
 
 # ==============================================================
-# FLASK SERVER (TO KEEP BOT ALIVE ON RENDER)
-# ==============================================================
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return "Bot is Running! 24/7 Status: ON"
-
-def run_web_server():
-    port = int(os.environ.get('PORT', 8080))
-    app.run(host='0.0.0.0', port=port)
-
-# ==============================================================
-# PART 1: SHEET 1 HELPERS
+# PART 1: SHEET 1 HELPERS (Cinevood / Movies4U)
 # ==============================================================
 
 def get_sheet1_ids():
+    """Sheet 1 se existing IDs (Titles) laata hai"""
     try:
         resp = requests.get(SHEET_API_1, timeout=15)
         if resp.status_code == 200:
@@ -68,6 +54,7 @@ def get_sheet1_ids():
         return []
 
 def upload_to_sheet1(movie_data):
+    """Cinevood/Movies4U ka data Sheet 1 me upload karta hai"""
     try:
         links1 = movie_data.get('Links1st', {})
         links2 = movie_data.get('Links2nd', {})
@@ -92,10 +79,11 @@ def upload_to_sheet1(movie_data):
         return False
 
 # ==============================================================
-# PART 2: SHEET 2 HELPERS
+# PART 2: SHEET 2 HELPERS (FilmyFly)
 # ==============================================================
 
 def get_sheet2_titles():
+    """Sheet 2 se existing Titles laata hai"""
     try:
         resp = requests.get(SHEET_API_2, timeout=15)
         if resp.status_code == 200:
@@ -108,16 +96,14 @@ def get_sheet2_titles():
         return []
 
 def upload_to_sheet2(data):
+    """FilmyFly ka data Sheet 2 me upload karta hai"""
     try:
         formatted_links = ""
-        if not data['files']:
-            formatted_links = "No Direct Links Found"
-        else:
-            for item in data['files']:
-                if item.get("type") == "header":
-                    formatted_links += f"\n--- {item['content']} ---\n"
-                elif item.get("type") == "file":
-                    formatted_links += f"{item['quality']}: {item['url']}\n"
+        for item in data['files']:
+            if item.get("type") == "header":
+                formatted_links += f"\n--- {item['content']} ---\n"
+            elif item.get("type") == "file":
+                formatted_links += f"{item['quality']}: {item['url']}\n"
         
         payload = {
             "action": "add",
@@ -136,7 +122,7 @@ def upload_to_sheet2(data):
         return False
 
 # ==============================================================
-# PART 3: SCRAPING HELPERS
+# PART 3: COMMON SCRAPING HELPERS
 # ==============================================================
 
 def clean_title(title):
@@ -182,7 +168,7 @@ def get_site_posts_generic(url, selector):
     return unique
 
 # ==============================================================
-# PART 4: SITE PROCESSORS
+# PART 4: SPECIFIC SITE SCRAPERS
 # ==============================================================
 
 def process_cinevood(url):
@@ -254,60 +240,37 @@ def process_filmyfly(url):
         if response.status_code != 200: return None
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        name_tag = soup.select_one('div.fname > div.colora') or soup.select_one('div.A1 h2') or soup.select_one('h2')
+        name_tag = soup.select_one('div.fname > div.colora') or soup.select_one('div.A1 h2')
         movie_name = name_tag.text.strip() if name_tag else "Unknown"
-        
         thumb_tag = soup.select_one('div.movie-thumb img')
         thumbnail = thumb_tag['src'] if thumb_tag else ""
-        
         ss_tag = soup.select_one('div.ss img')
         screenshot = ss_tag['src'] if ss_tag else ""
-        
-        # Download Link Discovery
-        dl_link = None
         dl_tag = soup.select_one('div.dlbtn a')
-        if dl_tag: dl_link = dl_tag.get('href')
-        if not dl_link:
-            for a in soup.find_all('a', href=True):
-                if "download" in a.text.lower():
-                    dl_link = a['href']; break
+        dl_link = dl_tag['href'] if dl_tag else None
 
         files_data = []
         if dl_link and dl_link.startswith("http"):
-            try:
-                r2 = requests.get(dl_link, headers=HEADERS, timeout=15)
-                s2 = BeautifulSoup(r2.content, 'html.parser')
-                all_dlinks = s2.select('div.dlink')
-                
-                if not all_dlinks:
-                    center_container = s2.select_one('div.card center div') or s2.select_one('div.card center')
-                    if center_container:
-                        for element in center_container.contents:
-                            if isinstance(element, NavigableString):
-                                clean = re.sub(r'[<•>]+', '', element.strip()).strip()
-                                if len(clean) > 3: files_data.append({"type": "header", "content": clean})
-                            elif element.name == 'div' or element.name == 'a':
-                                a_tag = element if element.name == 'a' else element.find('a')
-                                if a_tag and a_tag.get('href'):
-                                    q = a_tag.find('div', class_='dll')
-                                    quality = q.text.strip() if q else a_tag.text.strip()
-                                    files_data.append({"type": "file", "quality": quality or "Link", "url": a_tag.get('href')})
-                else:
-                    parent_container = all_dlinks[0].parent
-                    for element in parent_container.contents:
-                        if isinstance(element, NavigableString):
-                            clean = re.sub(r'[<•>]+', '', element.strip()).strip()
-                            if len(clean) > 3: files_data.append({"type": "header", "content": clean})
-                        elif element.name == 'div' and ('dlink' in element.get('class', []) or element.find('a')):
-                            a_tag = element.find('a')
-                            if a_tag and a_tag.get('href'):
-                                q = a_tag.find('div', class_='dll')
-                                quality = q.text.strip() if q else a_tag.text.strip()
-                                files_data.append({"type": "file", "quality": quality, "url": a_tag.get('href')})
-            except: pass
-
-        if not files_data and dl_link:
-             files_data.append({"type": "file", "quality": "Direct Download Page", "url": dl_link})
+            r2 = requests.get(dl_link, headers=HEADERS, timeout=15)
+            s2 = BeautifulSoup(r2.content, 'html.parser')
+            center_div = s2.select_one('div.card center div')
+            if not center_div:
+                first_dlink = s2.select_one('div.dlink')
+                if first_dlink: center_div = first_dlink.parent
+            
+            if center_div:
+                for element in center_div.contents:
+                    if isinstance(element, NavigableString):
+                        text = element.strip()
+                        clean = re.sub(r'[<•>]+', '', text).strip()
+                        if clean: files_data.append({"type": "header", "content": clean})
+                    elif element.name == 'div' and 'dlink' in element.get('class', []):
+                        a_tag = element.find('a')
+                        if a_tag:
+                            link_url = a_tag.get('href', '')
+                            dll_div = a_tag.find('div', class_='dll')
+                            quality = dll_div.text.strip() if dll_div else a_tag.text.strip()
+                            files_data.append({"type": "file", "quality": quality, "url": link_url})
 
         return {
             "title": movie_name,
@@ -319,125 +282,152 @@ def process_filmyfly(url):
     except: return None
 
 # ==============================================================
-# PART 5: MONITORING LOOP
+# PART 5: MAIN MONITORING LOOP
 # ==============================================================
 
 def monitor_loop():
     global IS_RUNNING
-    print("🚀 Monitoring Loop Active...")
+    print("🚀 All-in-One Monitor Started...")
     
-    while True: # Infinite loop inside thread
-        if IS_RUNNING:
-            try:
-                # --- SHEET 1 (CV + M4U) ---
-                existing_ids_1 = get_sheet1_ids()
-                
-                # Cinevood
-                cv_posts = get_site_posts_generic(URL_CINEVOOD, "article.latestPost a.post-image") or get_site_posts_generic(URL_CINEVOOD, "div.post a")
-                new_cv = []
-                for post in cv_posts[:6]:
-                    data = process_cinevood(post['url'])
-                    if data and str(data['id']) not in existing_ids_1: new_cv.append(data)
-                
-                if new_cv:
-                    new_cv.reverse()
-                    if LOG_CHAT_ID: bot.send_message(LOG_CHAT_ID, f"🔥 **CineVood:** Found {len(new_cv)} new.")
-                    for item in new_cv:
-                        if upload_to_sheet1(item):
-                            existing_ids_1.append(str(item['id']))
-                            if LOG_CHAT_ID: bot.send_message(LOG_CHAT_ID, f"✅ CV: {item['title']}")
-                        time.sleep(1)
+    while IS_RUNNING:
+        try:
+            # 1. Sheet 1 Logic (Cinevood + Movies4U)
+            existing_ids_1 = get_sheet1_ids()
+            
+            # Check Cinevood
+            cv_posts = get_site_posts_generic(URL_CINEVOOD, "article.latestPost a.post-image") or get_site_posts_generic(URL_CINEVOOD, "div.post a")
+            new_cv = []
+            for post in cv_posts[:6]:
+                data = process_cinevood(post['url'])
+                if data and str(data['id']) not in existing_ids_1: new_cv.append(data)
+            
+            if new_cv:
+                new_cv.reverse()
+                if LOG_CHAT_ID: bot.send_message(LOG_CHAT_ID, f"🔥 **CineVood:** Found {len(new_cv)} new.")
+                for item in new_cv:
+                    if upload_to_sheet1(item):
+                        existing_ids_1.append(str(item['id']))
+                        if LOG_CHAT_ID: bot.send_message(LOG_CHAT_ID, f"✅ CV Upload: {item['title']}")
+                    time.sleep(1)
 
-                # Movies4U
-                m4u_posts = get_site_posts_generic(URL_MOVIES4U, "a.post-thumbnail") or get_site_posts_generic(URL_MOVIES4U, "div.item a")
-                new_m4u = []
-                for post in m4u_posts[:6]:
-                    data = process_movies4u(post['url'])
-                    if data and str(data['id']) not in existing_ids_1: new_m4u.append(data)
-                
-                if new_m4u:
-                    new_m4u.reverse()
-                    if LOG_CHAT_ID: bot.send_message(LOG_CHAT_ID, f"🔥 **Movies4U:** Found {len(new_m4u)} new.")
-                    for item in new_m4u:
-                        if upload_to_sheet1(item):
-                            existing_ids_1.append(str(item['id']))
-                            if LOG_CHAT_ID: bot.send_message(LOG_CHAT_ID, f"✅ M4U: {item['title']}")
-                        time.sleep(1)
+            # Check Movies4U
+            m4u_posts = get_site_posts_generic(URL_MOVIES4U, "a.post-thumbnail") or get_site_posts_generic(URL_MOVIES4U, "div.item a")
+            new_m4u = []
+            for post in m4u_posts[:6]:
+                data = process_movies4u(post['url'])
+                if data and str(data['id']) not in existing_ids_1: new_m4u.append(data)
+            
+            if new_m4u:
+                new_m4u.reverse()
+                if LOG_CHAT_ID: bot.send_message(LOG_CHAT_ID, f"🔥 **Movies4U:** Found {len(new_m4u)} new.")
+                for item in new_m4u:
+                    if upload_to_sheet1(item):
+                        existing_ids_1.append(str(item['id']))
+                        if LOG_CHAT_ID: bot.send_message(LOG_CHAT_ID, f"✅ M4U Upload: {item['title']}")
+                    time.sleep(1)
 
-                # --- SHEET 2 (FilmyFly) ---
-                existing_titles_2 = get_sheet2_titles()
-                ff_posts = get_site_posts_generic(f"{URL_FILMYFLY}/", "div.fl a") or get_site_posts_generic(f"{URL_FILMYFLY}/", "div.A10 a")
-                ff_posts = [p for p in ff_posts if 'page-download' in p['url']]
-                new_ff = []
-                
-                for post in ff_posts[:6]:
-                    data = process_filmyfly(post['url'])
-                    if data and data['title']:
-                        clean_t = data['title'].strip().lower()
-                        if clean_t not in existing_titles_2: new_ff.append(data)
-                
-                if new_ff:
-                    new_ff.reverse()
-                    if LOG_CHAT_ID: bot.send_message(LOG_CHAT_ID, f"🔥 **FilmyFly:** Found {len(new_ff)} new.")
-                    for item in new_ff:
-                        if upload_to_sheet2(item):
-                            existing_titles_2.append(item['title'].strip().lower())
-                            if LOG_CHAT_ID: bot.send_message(LOG_CHAT_ID, f"✅ FF: {item['title']}")
-                        time.sleep(2)
+            # 2. Sheet 2 Logic (FilmyFly)
+            existing_titles_2 = get_sheet2_titles()
+            ff_posts = get_site_posts_generic(f"{URL_FILMYFLY}/", "div.fl a") or get_site_posts_generic(f"{URL_FILMYFLY}/", "div.A10 a")
+            ff_posts = [p for p in ff_posts if 'page-download' in p['url']]
+            new_ff = []
+            
+            for post in ff_posts[:6]:
+                data = process_filmyfly(post['url'])
+                if data and data['title']:
+                    clean_t = data['title'].strip().lower()
+                    if clean_t not in existing_titles_2: new_ff.append(data)
+            
+            if new_ff:
+                new_ff.reverse()
+                if LOG_CHAT_ID: bot.send_message(LOG_CHAT_ID, f"🔥 **FilmyFly:** Found {len(new_ff)} new.")
+                for item in new_ff:
+                    if upload_to_sheet2(item):
+                        existing_titles_2.append(item['title'].strip().lower())
+                        if LOG_CHAT_ID: bot.send_message(LOG_CHAT_ID, f"✅ FF Upload: {item['title']}")
+                    time.sleep(1)
 
-            except Exception as e:
-                print(f"Loop Error: {e}")
-        
-        time.sleep(CHECK_INTERVAL)
+            time.sleep(CHECK_INTERVAL)
+
+        except Exception as e:
+            print(f"Main Loop Error: {e}")
+            time.sleep(60)
 
 # ==============================================================
-# COMMANDS & MAIN
+# PART 6: MANUAL LINK HANDLER (NEW FEATURE)
 # ==============================================================
 
+@bot.message_handler(func=lambda message: message.text and message.text.startswith('http') and not message.text.startswith('/'))
+def handle_manual_link(message):
+    url = message.text.strip()
+    chat_id = message.chat.id
+    
+    bot.reply_to(message, "🔍 Detecting Website & Processing...")
+
+    # 1. Detect CINEVOOD
+    if "webrip.workers.dev" in url or "cinevood" in url:
+        data = process_cinevood(url)
+        if data:
+            bot.send_message(chat_id, f"🎬 **CineVood Detected:** {data['title']}\nUploading to Sheet 1...")
+            if upload_to_sheet1(data):
+                bot.send_message(chat_id, "✅ Upload Success (Sheet 1)")
+            else:
+                bot.send_message(chat_id, "❌ Upload Failed")
+        else:
+            bot.send_message(chat_id, "❌ Scrape Failed or Invalid URL")
+
+    # 2. Detect MOVIES4U
+    elif "movies4u" in url:
+        data = process_movies4u(url)
+        if data:
+            bot.send_message(chat_id, f"🎬 **Movies4U Detected:** {data['title']}\nUploading to Sheet 1...")
+            if upload_to_sheet1(data):
+                bot.send_message(chat_id, "✅ Upload Success (Sheet 1)")
+            else:
+                bot.send_message(chat_id, "❌ Upload Failed")
+        else:
+            bot.send_message(chat_id, "❌ Scrape Failed or Invalid URL")
+
+    # 3. Detect FILMYFLY
+    elif "filmyfiy" in url or "filmyfly" in url:
+        data = process_filmyfly(url)
+        if data:
+            bot.send_message(chat_id, f"🎬 **FilmyFly Detected:** {data['title']}\nUploading to Sheet 2...")
+            if upload_to_sheet2(data):
+                bot.send_message(chat_id, "✅ Upload Success (Sheet 2)")
+            else:
+                bot.send_message(chat_id, "❌ Upload Failed")
+        else:
+            bot.send_message(chat_id, "❌ Scrape Failed or Invalid URL")
+            
+    else:
+        bot.reply_to(message, "⚠️ Unknown Website! Please send valid links for CineVood, Movies4U, or FilmyFly.")
+
+# ==============================================================
+# BOT COMMANDS
+# ==============================================================
 @bot.message_handler(commands=['start'])
 def start_monitor(message):
-    global LOG_CHAT_ID, IS_RUNNING
-    LOG_CHAT_ID = message.chat.id
+    global IS_RUNNING, LOG_CHAT_ID
+    if IS_RUNNING:
+        bot.reply_to(message, "⚠️ Bot is already running.")
+        return
+    
     IS_RUNNING = True
-    bot.reply_to(message, "🟢 **Universal Scraper Started!**\nAuto-checking every 60s.")
+    LOG_CHAT_ID = message.chat.id
+    bot.reply_to(message, "🟢 **Universal Scraper Started!**\n\n1. Auto-Check every 60s.\n2. **Send any URL manually** to upload instantly.")
+    threading.Thread(target=monitor_loop, daemon=True).start()
 
 @bot.message_handler(commands=['stop'])
 def stop_monitor(message):
     global IS_RUNNING
+    if not IS_RUNNING:
+        bot.reply_to(message, "⚠️ Bot is stopped.")
+        return
+    
     IS_RUNNING = False
-    bot.reply_to(message, "🔴 **Monitoring Paused.** (Server is still running)")
+    bot.reply_to(message, "🔴 **Stopping...**")
 
-@bot.message_handler(func=lambda message: message.text and "http" in message.text)
-def handle_manual(message):
-    url = message.text.strip()
-    chat_id = message.chat.id
-    bot.reply_to(message, "🔍 Processing...")
-    
-    if "cinevood" in url or "webrip" in url:
-        d = process_cinevood(url)
-        if d and upload_to_sheet1(d): bot.send_message(chat_id, "✅ CineVood Added")
-        else: bot.send_message(chat_id, "❌ Failed")
-    elif "movies4u" in url:
-        d = process_movies4u(url)
-        if d and upload_to_sheet1(d): bot.send_message(chat_id, "✅ Movies4U Added")
-        else: bot.send_message(chat_id, "❌ Failed")
-    elif "filmy" in url:
-        d = process_filmyfly(url)
-        if d and upload_to_sheet2(d): bot.send_message(chat_id, "✅ FilmyFly Added")
-        else: bot.send_message(chat_id, "❌ Failed")
-    else:
-        bot.send_message(chat_id, "⚠️ Invalid URL")
-
-# START THREADS
-if __name__ == "__main__":
-    # 1. Start Monitor Thread
-    t = threading.Thread(target=monitor_loop, daemon=True)
-    t.start()
-    
-    # 2. Start Web Server (For Render)
-    print("🌍 Starting Web Server...")
-    threading.Thread(target=run_web_server, daemon=True).start()
-    
-    # 3. Start Bot
-    print("🤖 Bot Polling...")
-    bot.infinity_polling()
+# Start
+print("🤖 Universal Bot Online...")
+bot.infinity_polling()
