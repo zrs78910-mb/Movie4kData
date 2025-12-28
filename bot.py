@@ -4,14 +4,20 @@ import re
 import time
 import threading
 import json
+import sys
+import os
 from bs4 import BeautifulSoup, NavigableString
 
 # ==============================================================
 # --- CONFIGURATION (SETTINGS) ---
 # ==============================================================
 
-# 1. BOT TOKEN
-BOT_TOKEN = "8231679051:AAFoqLilEuYVXe8oXFNZmIDvHydE5EzqvyU"
+# 1. BOT TOKEN (FROM ARGUMENTS)
+if len(sys.argv) > 1:
+    BOT_TOKEN = sys.argv[1]
+else:
+    print("❌ Error: Please provide BOT_TOKEN as an argument.")
+    sys.exit(1)
 
 # 2. SHEET 1 API (Cinevood & Movies4U)
 SHEET_API_1 = "https://script.google.com/macros/s/AKfycbwou7PFhODrtOG9sYtfhW9fa_ci5VllKoeNjAdpfpNEaSjIeX9QuAHjVjz18ve4dhum/exec"
@@ -24,7 +30,6 @@ URL_CINEVOOD = "https://cv.webrip.workers.dev/"
 URL_MOVIES4U = "https://movies4u.fans/"
 URL_FILMYFLY = "https://www.filmyfiy.mov"
 
-# Check Interval (Seconds)
 CHECK_INTERVAL = 60
 
 HEADERS = {
@@ -33,15 +38,17 @@ HEADERS = {
 }
 
 bot = telebot.TeleBot(BOT_TOKEN)
-IS_RUNNING = False
+IS_RUNNING = True
 LOG_CHAT_ID = None
+
+# ... (Rest of your functions: get_sheet1_ids, upload_to_sheet1, process_cinevood, monitor_loop, etc.)
+# ... (Paste all previous helper functions here unchanged) ...
 
 # ==============================================================
 # PART 1: SHEET 1 HELPERS (Cinevood / Movies4U)
 # ==============================================================
 
 def get_sheet1_ids():
-    """Sheet 1 se existing IDs (Titles) laata hai"""
     try:
         resp = requests.get(SHEET_API_1, timeout=15)
         if resp.status_code == 200:
@@ -54,7 +61,6 @@ def get_sheet1_ids():
         return []
 
 def upload_to_sheet1(movie_data):
-    """Cinevood/Movies4U ka data Sheet 1 me upload karta hai"""
     try:
         links1 = movie_data.get('Links1st', {})
         links2 = movie_data.get('Links2nd', {})
@@ -83,7 +89,6 @@ def upload_to_sheet1(movie_data):
 # ==============================================================
 
 def get_sheet2_titles():
-    """Sheet 2 se existing Titles laata hai"""
     try:
         resp = requests.get(SHEET_API_2, timeout=15)
         if resp.status_code == 200:
@@ -96,7 +101,6 @@ def get_sheet2_titles():
         return []
 
 def upload_to_sheet2(data):
-    """FilmyFly ka data Sheet 2 me upload karta hai"""
     try:
         formatted_links = ""
         for item in data['files']:
@@ -354,80 +358,55 @@ def monitor_loop():
             time.sleep(60)
 
 # ==============================================================
-# PART 6: MANUAL LINK HANDLER (NEW FEATURE)
+# PART 6: MANUAL LINK HANDLER
 # ==============================================================
 
 @bot.message_handler(func=lambda message: message.text and message.text.startswith('http') and not message.text.startswith('/'))
 def handle_manual_link(message):
     url = message.text.strip()
     chat_id = message.chat.id
-    
-    bot.reply_to(message, "🔍 Detecting Website & Processing...")
+    bot.reply_to(message, "🔍 Processing...")
 
-    # 1. Detect CINEVOOD
-    if "webrip.workers.dev" in url or "cinevood" in url:
-        data = process_cinevood(url)
-        if data:
-            bot.send_message(chat_id, f"🎬 **CineVood Detected:** {data['title']}\nUploading to Sheet 1...")
-            if upload_to_sheet1(data):
-                bot.send_message(chat_id, "✅ Upload Success (Sheet 1)")
-            else:
-                bot.send_message(chat_id, "❌ Upload Failed")
-        else:
-            bot.send_message(chat_id, "❌ Scrape Failed or Invalid URL")
-
-    # 2. Detect MOVIES4U
+    if "cinevood" in url or "webrip" in url:
+        d = process_cinevood(url)
+        if d and upload_to_sheet1(d): bot.send_message(chat_id, "✅ CineVood Added")
+        else: bot.send_message(chat_id, "❌ Failed")
     elif "movies4u" in url:
-        data = process_movies4u(url)
-        if data:
-            bot.send_message(chat_id, f"🎬 **Movies4U Detected:** {data['title']}\nUploading to Sheet 1...")
-            if upload_to_sheet1(data):
-                bot.send_message(chat_id, "✅ Upload Success (Sheet 1)")
-            else:
-                bot.send_message(chat_id, "❌ Upload Failed")
-        else:
-            bot.send_message(chat_id, "❌ Scrape Failed or Invalid URL")
-
-    # 3. Detect FILMYFLY
-    elif "filmyfiy" in url or "filmyfly" in url:
-        data = process_filmyfly(url)
-        if data:
-            bot.send_message(chat_id, f"🎬 **FilmyFly Detected:** {data['title']}\nUploading to Sheet 2...")
-            if upload_to_sheet2(data):
-                bot.send_message(chat_id, "✅ Upload Success (Sheet 2)")
-            else:
-                bot.send_message(chat_id, "❌ Upload Failed")
-        else:
-            bot.send_message(chat_id, "❌ Scrape Failed or Invalid URL")
-            
+        d = process_movies4u(url)
+        if d and upload_to_sheet1(d): bot.send_message(chat_id, "✅ Movies4U Added")
+        else: bot.send_message(chat_id, "❌ Failed")
+    elif "filmy" in url:
+        d = process_filmyfly(url)
+        if d and upload_to_sheet2(d): bot.send_message(chat_id, "✅ FilmyFly Added")
+        else: bot.send_message(chat_id, "❌ Failed")
     else:
-        bot.reply_to(message, "⚠️ Unknown Website! Please send valid links for CineVood, Movies4U, or FilmyFly.")
+        bot.send_message(chat_id, "⚠️ Invalid URL")
 
 # ==============================================================
-# BOT COMMANDS
+# COMMANDS & MAIN
 # ==============================================================
+
 @bot.message_handler(commands=['start'])
 def start_monitor(message):
     global IS_RUNNING, LOG_CHAT_ID
     if IS_RUNNING:
         bot.reply_to(message, "⚠️ Bot is already running.")
         return
-    
     IS_RUNNING = True
     LOG_CHAT_ID = message.chat.id
-    bot.reply_to(message, "🟢 **Universal Scraper Started!**\n\n1. Auto-Check every 60s.\n2. **Send any URL manually** to upload instantly.")
+    bot.reply_to(message, "🟢 **Monitor Started!**")
     threading.Thread(target=monitor_loop, daemon=True).start()
 
 @bot.message_handler(commands=['stop'])
 def stop_monitor(message):
     global IS_RUNNING
-    if not IS_RUNNING:
-        bot.reply_to(message, "⚠️ Bot is stopped.")
-        return
-    
     IS_RUNNING = False
-    bot.reply_to(message, "🔴 **Stopping...**")
+    bot.reply_to(message, "🔴 **Stopped.**")
 
-# Start
-print("🤖 Universal Bot Online...")
+# START BOT
+print("🤖 Bot Online...")
+# Start monitoring on boot (optional)
+IS_RUNNING = True
+threading.Thread(target=monitor_loop, daemon=True).start()
+
 bot.infinity_polling()
